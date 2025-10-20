@@ -2,28 +2,31 @@ import express from "express";
 import cors from "cors";
 import { spawn } from "child_process";
 import NodeCache from "node-cache";
+import path from "path";
 
 const app = express();
 
-// 🧠 Cache YouTube metadata for 1 hour (3600 seconds)
+// 🧠 Cache YouTube metadata for 1 hour
 const cache = new NodeCache({ stdTTL: 3600 });
 
 // ✅ Allow frontend & localhost
 const allowedOrigins = [
   "https://www.shortsload.com",
-  "http://localhost:3000"
+  "http://localhost:3000",
 ];
 
-app.use(cors({
-  origin: allowedOrigins,
-  methods: ["GET"],
-}));
+app.use(
+  cors({
+    origin: allowedOrigins,
+    methods: ["GET"],
+  })
+);
 
 app.use(express.json());
 
 app.get("/", (req, res) => res.send("✅ ShortsLoad Backend Running"));
 
-// 🧩 Extract video ID (works for YouTube Shorts, normal URLs, etc.)
+// 🧩 Extract YouTube video ID
 function extractVideoId(url) {
   try {
     const u = new URL(url);
@@ -43,7 +46,7 @@ app.get("/api/getinfo", async (req, res) => {
   const videoId = extractVideoId(url);
   if (!videoId) return res.status(400).json({ error: "Invalid YouTube URL" });
 
-  // ✅ 1. Check cache first
+  // ✅ 1. Cache check
   const cached = cache.get(videoId);
   if (cached) {
     console.log(`⚡ Cache hit: ${videoId}`);
@@ -52,9 +55,18 @@ app.get("/api/getinfo", async (req, res) => {
 
   console.log(`🆕 Cache miss: ${videoId}`);
 
-  // ✅ 2. Fetch via yt-dlp if not cached
-  const proc = spawn("yt-dlp", ["-j", "--no-warnings", url]);
-  let out = "", err = "";
+  // ✅ 2. yt-dlp fetch with cookies
+  const cookiesPath = path.resolve("/home/ec2-user/shortsload-backend/cookies.txt");
+  const proc = spawn("yt-dlp", [
+    "--dump-single-json",
+    "--no-warnings",
+    "--cookies",
+    cookiesPath,
+    url,
+  ]);
+
+  let out = "",
+    err = "";
 
   proc.stdout.on("data", (d) => (out += d.toString()));
   proc.stderr.on("data", (d) => (err += d.toString()));
@@ -62,13 +74,17 @@ app.get("/api/getinfo", async (req, res) => {
   proc.on("close", (code) => {
     if (code !== 0 || !out.trim()) {
       console.error("yt-dlp error:", err);
+      if (err.includes("Sign in to confirm")) {
+        return res
+          .status(403)
+          .json({ error: "YouTube blocked request — update cookies.txt" });
+      }
       return res.status(500).json({ error: "Failed to fetch formats" });
     }
 
     try {
       const meta = JSON.parse(out);
 
-      // ✅ Only formats with BOTH audio & video
       const formats = (meta.formats || [])
         .filter(
           (f) =>
@@ -95,7 +111,6 @@ app.get("/api/getinfo", async (req, res) => {
         formats,
       };
 
-      // ✅ 3. Store in cache
       cache.set(videoId, result);
       console.log(`💾 Cached: ${videoId}`);
 
